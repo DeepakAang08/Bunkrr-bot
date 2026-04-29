@@ -7,164 +7,150 @@ from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ============================
-# PUT YOUR BOT TOKEN HERE
-# ============================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8604002829:AAFGYbn3Hx7FyXU1MoXdYToEpZzqTdoJ55A")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TOKEN_HERE")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "@yourchannel")  # e.g. @mychannel
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
-
-# ---- Dummy web server to satisfy Render ----
+# ---- Dummy web server for Render ----
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is running!")
+        self.wfile.write(b"OK")
     def log_message(self, format, *args):
-        pass  # Suppress logs
+        pass
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
-# ---- Helper: Extract files from a Bunkr album ----
-def get_bunkr_files(album_url: str) -> list[dict]:
+# ---- Scraping ----
+def get_bunkr_files(url):
     try:
-        resp = requests.get(album_url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-    except Exception:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+        files, seen = [], set()
+        for a in soup.select("a[href]"):
+            href = a["href"]
+            if re.search(r"/(v|i|d|f)/[^/]+$", href):
+                full = href if href.startswith("http") else "https://bunkr.site" + href
+                if full not in seen:
+                    seen.add(full)
+                    files.append({"url": full, "name": full.split("/")[-1]})
+        return files
+    except:
         return []
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    files = []
-
-    for a_tag in soup.select("a[href]"):
-        href = a_tag["href"]
-        if re.search(r"/(v|i|d|f)/[^/]+$", href):
-            full_url = href if href.startswith("http") else "https://bunkr.site" + href
-            name = full_url.split("/")[-1]
-            files.append({"page_url": full_url, "name": name})
-
-    seen = set()
-    unique = []
-    for f in files:
-        if f["page_url"] not in seen:
-            seen.add(f["page_url"])
-            unique.append(f)
-
-    return unique
-
-
-def get_direct_url(file_page_url: str) -> str | None:
+def get_direct(page_url):
     try:
-        resp = requests.get(file_page_url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-    except Exception:
-        return None
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    for tag in soup.select("source[src]"):
-        src = tag.get("src", "")
-        if src.startswith("http") and any(ext in src for ext in [".mp4", ".mov", ".mkv", ".avi"]):
-            return src
-
-    for tag in soup.select("a[download]"):
-        href = tag.get("href", "")
-        if href.startswith("http"):
-            return href
-
-    for tag in soup.select("img[src]"):
-        src = tag.get("src", "")
-        if src.startswith("http") and any(ext in src for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
-            return src
-
+        r = requests.get(page_url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+        for t in soup.select("source[src]"):
+            s = t.get("src", "")
+            if s.startswith("http"): return s
+        for t in soup.select("a[download]"):
+            s = t.get("href", "")
+            if s.startswith("http"): return s
+        for t in soup.select("img[src]"):
+            s = t.get("src", "")
+            if s.startswith("http"): return s
+    except:
+        pass
     return None
 
-
-# ---- Bot Handlers ----
+# ---- Bot Commands ----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to the Bunkr Downloader Bot!\n\n"
-        "Just send me a Bunkr album link like:\n"
-        "https://bunkr.site/a/xxxxxxxx\n\n"
-        "And I'll download all the files for you! 🚀"
+        "👋 Hello! I send Bunkr files to your channel.\n\n"
+        "Usage:\n"
+        "/send https://bunkr.site/a/xxxxxxxx\n\n"
+        f"Files will be posted to: {CHANNEL_ID}"
     )
 
-
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-
-    if "bunkr" not in url or "/a/" not in url:
+async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if a URL was provided
+    if not context.args:
         await update.message.reply_text(
-            "⚠️ Please send a valid Bunkr album link.\n"
-            "Example: https://bunkr.site/a/xxxxxxxx"
+            "⚠️ Please provide a Bunkr link!\n"
+            "Usage: /send https://bunkr.site/a/xxxxxxxx"
         )
         return
 
-    await update.message.reply_text("🔍 Scanning album... please wait.")
+    url = context.args[0].strip()
+
+    if "bunkr" not in url or "/a/" not in url:
+        await update.message.reply_text("⚠️ Invalid Bunkr album link.")
+        return
+
+    await update.message.reply_text(f"🔍 Scanning album...")
 
     files = get_bunkr_files(url)
 
     if not files:
-        await update.message.reply_text("❌ No files found. The album might be empty or the link is invalid.")
+        await update.message.reply_text("❌ No files found in that album.")
         return
 
-    await update.message.reply_text(f"✅ Found {len(files)} file(s). Starting download...")
+    await update.message.reply_text(
+        f"✅ Found {len(files)} file(s).\n"
+        f"📤 Sending to {CHANNEL_ID}..."
+    )
 
-    success = 0
-    failed = 0
+    ok, fail = 0, 0
 
-    for i, file_info in enumerate(files, 1):
-        await update.message.reply_text(f"⬇️ Downloading file {i}/{len(files)}: {file_info['name']}")
+    for i, f in enumerate(files, 1):
+        await update.message.reply_text(f"⬇️ Processing {i}/{len(files)}: {f['name']}")
 
-        direct_url = get_direct_url(file_info["page_url"])
-
-        if not direct_url:
-            await update.message.reply_text(f"⚠️ Could not get download link for: {file_info['name']}")
-            failed += 1
+        direct = get_direct(f["url"])
+        if not direct:
+            await update.message.reply_text(f"⚠️ Skipped (no link): {f['name']}")
+            fail += 1
             continue
 
         try:
-            r = requests.get(direct_url, headers=HEADERS, timeout=60, stream=True)
-            r.raise_for_status()
-            file_data = r.content
-            fname = file_info["name"]
+            data = requests.get(direct, headers=HEADERS, timeout=60).content
+            n = f["name"].lower()
 
-            if any(fname.lower().endswith(ext) for ext in [".mp4", ".mov", ".mkv", ".avi", ".webm"]):
-                await update.message.reply_video(video=file_data, filename=fname)
-            elif any(fname.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
-                await update.message.reply_photo(photo=file_data)
+            if any(n.endswith(x) for x in [".mp4", ".mov", ".mkv", ".avi", ".webm"]):
+                await context.bot.send_video(
+                    chat_id=CHANNEL_ID,
+                    video=data,
+                    filename=f["name"],
+                    caption=f["name"]
+                )
+            elif any(n.endswith(x) for x in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
+                await context.bot.send_photo(
+                    chat_id=CHANNEL_ID,
+                    photo=data,
+                    caption=f["name"]
+                )
             else:
-                await update.message.reply_document(document=file_data, filename=fname)
-
-            success += 1
+                await context.bot.send_document(
+                    chat_id=CHANNEL_ID,
+                    document=data,
+                    filename=f["name"],
+                    caption=f["name"]
+                )
+            ok += 1
 
         except Exception as e:
-            await update.message.reply_text(f"❌ Failed to send {file_info['name']}: {str(e)}")
-            failed += 1
+            await update.message.reply_text(f"❌ Failed: {f['name']}\n{str(e)}")
+            fail += 1
 
     await update.message.reply_text(
-        f"🏁 Done!\n✅ Success: {success}\n❌ Failed: {failed}"
+        f"🏁 All done!\n"
+        f"✅ Sent: {ok}\n"
+        f"❌ Failed: {fail}\n"
+        f"📢 Check your channel: {CHANNEL_ID}"
     )
-
 
 # ---- Main ----
 def main():
-    # Start dummy web server in background thread
-    t = threading.Thread(target=run_web_server, daemon=True)
-    t.start()
-
+    threading.Thread(target=run_web_server, daemon=True).start()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    print("Bot is running...")
+    app.add_handler(CommandHandler("send", send_command))
+    print("Bot running!")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
