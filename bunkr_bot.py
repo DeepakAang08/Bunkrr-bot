@@ -1,6 +1,6 @@
 import os
 import re
-import requests
+import threading
 from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -150,6 +150,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---- Main ----
 def main():
+    t = threading.Thread(target=run_web_server, daemon=True)
+    t.start()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
